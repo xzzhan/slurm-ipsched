@@ -58,7 +58,7 @@ const uint32_t		plugin_version	= 100;
 /* A plugin-global errno. */
 static int plugin_errno = SLURM_SUCCESS;
 
-static pthread_t backfill_thread = 0;
+static pthread_t lpsched_thread = 0;
 static pthread_mutex_t thread_flag_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**************************************************************************/
@@ -71,7 +71,7 @@ int init( void )
 	verbose( "sched: LPSched plugin loaded" );
 
 	pthread_mutex_lock( &thread_flag_mutex );
-	if ( backfill_thread ) {
+	if ( lpsched_thread ) {
 		debug2( "Backfill thread already running, not starting "
 			"another" );
 		pthread_mutex_unlock( &thread_flag_mutex );
@@ -80,7 +80,7 @@ int init( void )
 
 	slurm_attr_init( &attr );
 	/* since we do a join on this later we don't make it detached */
-	if (pthread_create( &backfill_thread, &attr, backfill_agent, NULL))
+	if (pthread_create( &lpsched_thread, &attr, lpsched_agent, NULL))
 		error("Unable to start backfill thread: %m");
 	pthread_mutex_unlock( &thread_flag_mutex );
 	slurm_attr_destroy( &attr );
@@ -94,11 +94,11 @@ int init( void )
 void fini( void )
 {
 	pthread_mutex_lock( &thread_flag_mutex );
-	if ( backfill_thread ) {
+	if ( lpsched_thread ) {
 		verbose( "Backfill scheduler plugin shutting down" );
-		stop_backfill_agent();
-		pthread_join(backfill_thread, NULL);
-		backfill_thread = 0;
+		stop_lpsched_agent();
+		pthread_join(lpsched_thread, NULL);
+		lpsched_thread = 0;
 	}
 	pthread_mutex_unlock( &thread_flag_mutex );
 }
@@ -108,7 +108,7 @@ void fini( void )
 /**************************************************************************/
 int slurm_sched_plugin_reconfig( void )
 {
-	backfill_reconfig();
+	lpsched_reconfig();
 	return SLURM_SUCCESS;
 }
 

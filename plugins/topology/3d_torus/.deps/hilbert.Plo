@@ -1,3 +1,0 @@
-hilbert.lo: hilbert.c ../../../../src/plugins/topology/3d_torus/hilbert.h
-
-../../../../src/plugins/topology/3d_torus/hilbert.h:

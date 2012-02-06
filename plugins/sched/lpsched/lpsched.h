@@ -36,15 +36,16 @@ typedef struct sched_nodeinfo {
 	uint16_t rem_gpus;
 } sched_nodeinfo_t;
 
+extern char* get_cplex_license_address(void);
 
-/* backfill_agent - detached thread periodically attempts to backfill jobs */
-extern void *backfill_agent(void *args);
+/* lpsched_agent - detached thread periodically attempts to backfill jobs */
+extern void *lpsched_agent(void *args);
 
-/* Terminate backfill_agent */
-extern void stop_backfill_agent(void);
+/* Terminate lpsched_agent */
+extern void stop_lpsched_agent(void);
 
 /* Note that slurm.conf has changed */
-extern void backfill_reconfig(void);
+extern void lpsched_reconfig(void);
 
 typedef struct solver_job_list {
 	struct job_record *job_ptr;

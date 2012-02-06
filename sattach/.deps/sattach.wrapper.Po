@@ -1,1 +1,0 @@
-sattach.wrapper.o: sattach.wrapper.c

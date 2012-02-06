@@ -1,3 +1,0 @@
-malloc.lo: malloc.c ../../config.h
-
-../../config.h:

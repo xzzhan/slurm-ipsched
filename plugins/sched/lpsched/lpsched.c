@@ -19,7 +19,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include "lp_lib.h"
 
 #include "slurm/slurm.h"
 #include "slurm/slurm_errno.h"
@@ -50,14 +49,18 @@
 #  define SCHED_INTERVAL	3
 #endif
 
-/* max # of jobs = 50 */
+/* max # of jobs = 200 */
 #ifndef MAX_JOB_COUNT
-#define   MAX_JOB_COUNT 50
+#define   MAX_JOB_COUNT 200
 #endif
 
 #define SLURMCTLD_THREAD_LIMIT	5
 
 extern int gres_job_gpu_count(List job_gres_list);
+static char *cplex_license_address;
+extern int solve_allocation(int m, int n, int timeout, 
+			sched_nodeinfo_t *node_array, 
+			solver_job_list_t *job_array);
 /*********************** local variables *********************/
 static bool stop_lpsched = false;
 static pthread_mutex_t term_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -108,14 +111,22 @@ static void _load_config(void)
 		fatal("Invalid scheduler interval: %d",
 		      sched_interval);
 	}
+	if (sched_params && (tmp_ptr=strstr(sched_params, "cplex_lic=")))
+		cplex_license_address = (tmp_ptr + 10);
 
 	if (sched_params && (tmp_ptr=strstr(sched_params, "max_job_count=")))
-		max_job_count = atoi(tmp_ptr + 11);
+		max_job_count = atoi(tmp_ptr + 14);
 	if (max_job_count < 1) {
 		fatal("Invalid lpsched max_job_count: %d",
 		      max_job_count);
 	}
 	xfree(sched_params);
+}
+
+extern char* get_cplex_license_address(void)
+{
+	_load_config();
+	return cplex_license_address;
 }
 
 /* Note that slurm.conf has changed */
@@ -151,6 +162,7 @@ extern void *lpsched_agent(void *args)
 		START_TIMER;
 		lock_slurmctld(all_locks);
 		while (_run_solver_opt()) ;
+		debug3("left runsolveropt");
 		last_lpsched_time = time(NULL);
 		unlock_slurmctld(all_locks);
 		END_TIMER;
@@ -183,229 +195,6 @@ static int _yield_locks(void)
 		return 1;
 }
 
-int solve_allocation(int nodeSize, int windowSize, int timeout,
-		sched_nodeinfo_t *node_array, solver_job_list_t *job_array)
-{
-	lprec *lp;
-	solver_job_list_t *solver_job_ptr;
-	int Ncol = (2 * nodeSize + 2) * windowSize;
-	int i, j, k;
-	int *colno = (int *)malloc(2 * windowSize * sizeof(*colno));
-	REAL *row = (REAL *)malloc(2 * windowSize * sizeof(*row));
-	REAL *var = (REAL *)malloc(Ncol * sizeof(*var));
-	REAL *sparserow;
-	int *sparsecol;
-	char varname[20];
-	/*
-	m = nodesize
-	n = windowsize
-	s_(n) binary variable, selected or not : 1 - n
-	x_(m*n) on_node cpu assignment variables : n + 1 : n*(m+1)
-	t_(n*m) whether a job uses a node or not : n*(m+1)+1 : n*(2m+1)
-	c_(n) cost variable : (n*2m+1) + 1 : n*(2m+2)
-	sum: n*(2m+2)
-	*/
-	lp = make_lp(0,Ncol);
-	set_timeout(lp, timeout);
-	if (lp == NULL)
-		return -1;
-
-	for (j = 0; j < windowSize; j++) {
-		sprintf(varname, "s_%d",j+1);
-		set_col_name(lp, j + 1, varname);
-	}
-	for (i = 0; i < nodeSize; i++) {
-		for (j = 0; j < windowSize; j++) {		
-			sprintf(varname, "x_%d_%d",i+1,j+1);
-			set_col_name(lp, (1 + i) * windowSize + 1 + j, varname);
-		}
-	}
-	for (j = 0; j < windowSize; j++) {		
-		sprintf(varname, "c_%d",j+1);
-		set_col_name(lp, windowSize * (2 * nodeSize + 1) + j + 1, varname);
-		for (i = 0; i < nodeSize; i++) {
-			sprintf(varname, "t_%d_%d",j+1,i+1);
-			set_col_name(lp, windowSize * (nodeSize + 1) + j * nodeSize + 1 + i, varname);
-		}
-	}
-
-	set_add_rowmode(lp, TRUE);
-        /*
-	sum over nodes (allocated cpu) should be equal to job's requested cpu
-	sum_i(x_ij) == r_j * s_j
-	*/
-	sparserow = (REAL*)malloc((nodeSize + 1) * sizeof(*sparserow));
-	sparsecol = (int*)malloc((nodeSize + 1) * sizeof(*colno));
-	for (j = 0; j < windowSize; j++) {
-		for (i = 0; i < nodeSize; i++) {
-			sparserow[i] = 1.0;
-			sparsecol[i] = (1 + i) * windowSize + j + 1;
-		}
-		sparserow[nodeSize] = (int)(-job_array[j].min_cpus);
-		sparsecol[nodeSize] = j + 1;
-		add_constraintex(lp, nodeSize + 1, sparserow, sparsecol, EQ, 0);
-	}
-	free(sparserow);
-	free(sparsecol);
-
-        /*
-	sum over jobs for cpu should be available 
-	sum_j(x_ij) <= R_i
-	*/
-	sparserow = (REAL*)malloc(windowSize * sizeof(*sparserow));
-	sparsecol = (int*)malloc(windowSize * sizeof(*colno));
-	for (i = 0; i < nodeSize; i++) {
-		for (j = 0; j < windowSize; j++) {
-			sparserow[j] = 1.0;
-			sparsecol[j] = (1 + i) * windowSize + j + 1;
-		}
-		add_constraintex(lp, windowSize, sparserow, sparsecol, LE, (int)(node_array[i].rem_cpus));
-	}
-	free(sparserow);
-	free(sparsecol);
-
-        /*
-	sum over jobs for gpu should be available on that node
-	sum_j(t_ji * g_j) <= G_i
-	*/
-	sparserow = (REAL*)malloc(windowSize * sizeof(*sparserow));
-	sparsecol = (int*)malloc(windowSize * sizeof(*colno));
-	for (i = 0; i < nodeSize; i++) {
-		for (j = 0; j < windowSize; j++) {
-			sparserow[j] = job_array[j].gpu;
-			sparsecol[j] = windowSize * (nodeSize + 1) + 1 + j * nodeSize + i;
-		}
-		add_constraintex(lp, windowSize, sparserow, sparsecol, LE, (int)(node_array[i].rem_gpus));
-	}
-	free(sparserow);
-	free(sparsecol);
-
-	/* 
-	FUTURE WORK FOR TOPOLOGY AWARENESS
-	t_ji is 1 if job j is allocated resourced in node i
-	t_ji = 1 if x_ij > 0
-	*/
-	sparserow = (REAL*)malloc(2 * sizeof(*sparserow));
-	sparsecol = (int*)malloc(2 * sizeof(*colno));
-	for (j = 0; j < windowSize; j++) {
-		for (i = 0; i < nodeSize; i++) {
-			sparserow[0] = 1.0;
-			sparsecol[0] = (1 + i) * windowSize + 1 + j;
-			sparsecol[1] = windowSize * (nodeSize + 1) + 1 + j * nodeSize + i;
-/*			if ((int)(job_array[j].min_cpus) < (int)(node_array[i].rem_cpus))
-				sparserow[1] = -(int)job_array[j].min_cpus;
-			else 
-				sparserow[1] = -(int)node_array[i].rem_cpus;
-*/
-			sparserow[1] = -1.0*MIN((int)(job_array[j].min_cpus),(int)(node_array[i].rem_cpus));
-			add_constraintex(lp, 2, sparserow, sparsecol, LE, 0);
-			sparserow[0] = 1.0;
-			sparsecol[0] = (1 + i) * windowSize + 1 + j;
-			sparsecol[1] = windowSize * (nodeSize + 1) + 1 + j * nodeSize + i;
-			sparserow[1] = -1;
-			add_constraintex(lp, 2, sparserow, sparsecol, GE, 0);
-		}
-	}
-	free(sparserow);
-	free(sparsecol);
-
-        /*
-	cost is only selected nodes 
-	c_j constraint; sum_i(t_ji) / (nodeSize + 1)
-	*/
-	sparserow = (REAL*)malloc((nodeSize + 1) * sizeof(*sparserow));
-	sparsecol = (int*)malloc((nodeSize + 1) * sizeof(*colno));
-	for (j = 0; j < windowSize; j++) {
-		for (i = 0; i < nodeSize; i++) {
-			sparserow[i] = 1.0;
-			sparsecol[i] = windowSize * (nodeSize + 1) + 1 + j * nodeSize + i;
-		}
-		sparserow[nodeSize] = -(nodeSize + 1);
-		sparsecol[nodeSize] = windowSize * (2 * nodeSize + 1) + j + 1;
-		add_constraintex(lp, nodeSize + 1, sparserow, sparsecol, EQ, 0);
-	}
-	free(sparserow);
-	free(sparsecol);
-
-        /*
-	min_nodes <= c_j * (nodeSize + 1) <= max_nodes
-	*/
-	sparserow = (REAL*)malloc((2) * sizeof(*sparserow));
-	sparsecol = (int*)malloc((2) * sizeof(*colno));
-	for (j = 0; j < windowSize; j++) {
-		sparserow[0] = 1.0 + 1.0 * nodeSize;
-		sparserow[1] = -(int)(job_array[j].min_nodes);
-		sparsecol[0] = windowSize * (2 * nodeSize + 1) + 1 + j;
-		sparsecol[1] = j + 1;
-		add_constraintex(lp, 2, sparserow, sparsecol, GE, 0);
-		sparserow[0] = 1.0 + 1.0 * nodeSize;
-		sparserow[1] = -(int)(job_array[j].max_nodes);
-		sparsecol[0] = windowSize * (2 * nodeSize + 1) + 1 + j;
-		sparsecol[1] = j + 1;
-		add_constraintex(lp, 2, sparserow, sparsecol, LE, 0);
-	}
-	free(sparserow);
-	free(sparsecol);
-
-	set_add_rowmode(lp, FALSE);
-	/* set the objective function to p_j * (s_j - c_j) */
-	for (j = 0; j < windowSize; j++) {
-		colno[j] = j + 1;
-		row[j] = (double)(job_array[j].priority);
-		/* topo-aware 
-		colno[j + windowSize] = j + 1 + windowSize;
-		row[j + windowSize] = -job_array[j].priority;		
-		*/
-	}
-	set_obj_fnex(lp, windowSize, row, colno);
-	set_maxim(lp);
-	/* 
-	set the s_j to be binary
-	x_ij to integer
-	t_ij to binary
-	*/	
-	for (j = 1; j <= windowSize; j++) {
-		set_int(lp, j, TRUE); /* s_j */
-		set_bounds(lp, j, 0.0, 1.0);
-	}
-	for (j = windowSize + 1; j <= windowSize * (nodeSize + 1); j++) {
-		set_int(lp, j, TRUE); /* x_ij */
-		set_bounds(lp, j, 0.0, get_infinite(lp));
-	}
-	for (j = windowSize * (nodeSize + 1) + 1; j <= windowSize * (2 * nodeSize + 1); j++) {
-		set_int(lp, j, TRUE); /* t_ij */
-		set_bounds(lp, j, 0.0, 1.0);
-	}
-	set_verbose(lp,NORMAL);
-	write_lp(lp, "model.lp");
-	k = solve(lp);
-	get_variables(lp, var);	
-	delete_lp(lp);
-	for (j = 0; j < windowSize; j++) {
-		if (var[j] > 0) {
-			solver_job_ptr = &job_array[j];
-			solver_job_ptr->node_bitmap = (bitstr_t *) bit_alloc (node_record_count);
-			solver_job_ptr->job_ptr->details->req_node_bitmap = (bitstr_t *) bit_alloc (node_record_count);
-			solver_job_ptr->onnodes = (uint32_t *) xmalloc (sizeof(uint32_t)*node_record_count);/**/
-			solver_job_ptr->job_ptr->details->req_node_layout = (uint16_t *)xmalloc(sizeof(uint16_t) * node_record_count);
-			solver_job_ptr->job_ptr->details->req_node_bitmap = (bitstr_t *) bit_alloc (node_record_count);
-			for (i = 0; i < nodeSize; i++) {
-				k = (1 + i) * windowSize + j;
-				if (var[k] > 0) {
-					bit_set (solver_job_ptr->node_bitmap, (bitoff_t) (i));
-					bit_set (solver_job_ptr->job_ptr->details->req_node_bitmap, (bitoff_t) (i));		
-					node_array[i].rem_cpus -= var[k];
-					node_array[i].rem_gpus -= solver_job_ptr->gpu;
-					solver_job_ptr->onnodes[i] = var[k]; /**/
-					solver_job_ptr->job_ptr->details->req_node_layout[i] = solver_job_ptr->onnodes[i]; 
-					solver_job_ptr->alloc_total += var[k];
-				}
-			}
-		} else
-			job_array[j].alloc_total = 0;
-	} 
-	return k;
-}
 
 /* Try to start the job on any non-reserved nodes */
 static int _start_job(struct job_record *job_ptr, bitstr_t *bitmap)
@@ -450,6 +239,14 @@ static int _start_job(struct job_record *job_ptr, bitstr_t *bitmap)
 	return rc;
 }
 
+static void free_and_null (char **ptr)
+{
+	if ( *ptr != NULL ) {
+		free (*ptr);
+		*ptr = NULL;
+	}
+}
+
 
 static int _run_solver_opt(void)
 {
@@ -458,10 +255,9 @@ static int _run_solver_opt(void)
 	List job_queue;
 	job_queue_rec_t *job_queue_rec;
 	slurmdb_qos_rec_t *qos_ptr = NULL;
-	char str[64];
 	int i, j, solver_job_idx;
 	struct job_record *job_ptr;
-	solver_job_list_t *job_list, *solver_job_ptr;
+	solver_job_list_t *job_list, *sjob_ptr;
 	struct part_record *part_ptr = NULL;
 	uint32_t end_time, time_limit, comp_time_limit, orig_time_limit;
 	uint32_t min_nodes, max_nodes, req_nodes, minprio = (uint32_t)0;
@@ -489,7 +285,10 @@ static int _run_solver_opt(void)
 
 	debug("generating job queue at %lld",(long long)sched_start);
 	/* generate job queue */
-	job_list = (solver_job_list_t*)malloc(max_job_count * sizeof(solver_job_list_t));
+	if (max_job_count > list_count(job_queue))
+		max_job_count = list_count(job_queue);
+	job_list = (solver_job_list_t*)malloc(
+			sizeof(solver_job_list_t) * max_job_count);
 	/* will be converted to priority ordered list */
 	solver_job_idx = 0;
 	while ((job_queue_rec = (job_queue_rec_t *)
@@ -580,41 +379,52 @@ static int _run_solver_opt(void)
 		else
 			end_time = (time_limit * 60) + now;
 
-		solver_job_ptr = &job_list[solver_job_idx++];
-		solver_job_ptr->job_ptr = job_ptr;
-		solver_job_ptr->job_id = job_ptr->job_id;
-		solver_job_ptr->min_nodes = min_nodes;
-		solver_job_ptr->max_nodes = min_nodes;
-		solver_job_ptr->gpu = gres_job_gpu_count(solver_job_ptr->job_ptr->gres_list);
-		solver_job_ptr->min_cpus = job_ptr->details->min_cpus;
-		solver_job_ptr->max_cpus = job_ptr->details->max_cpus;
-		solver_job_ptr->priority = job_ptr->priority;
-		if ((double)solver_job_ptr->priority < (double)minprio)
-			minprio = (double)solver_job_ptr->priority;
-		debug("minprio: %d %f",minprio,(double)minprio);
-		if ((int)solver_job_ptr->max_cpus < (int)solver_job_ptr->min_cpus)
-			solver_job_ptr->max_cpus = solver_job_ptr->min_cpus;
+		sjob_ptr = &job_list[solver_job_idx++];
+		sjob_ptr->job_ptr = job_ptr;
+		sjob_ptr->job_id = job_ptr->job_id;
+		sjob_ptr->min_nodes = min_nodes;
+		sjob_ptr->max_nodes = max_nodes;
+		sjob_ptr->gpu = gres_job_gpu_count(job_ptr->gres_list);
+		sjob_ptr->min_cpus = job_ptr->details->min_cpus;
+		sjob_ptr->max_cpus = job_ptr->details->max_cpus;
+		sjob_ptr->priority = job_ptr->priority;
+		if ((double)sjob_ptr->priority < (double)minprio)
+			minprio = (double)sjob_ptr->priority;
+		if ((int)sjob_ptr->max_cpus < (int)sjob_ptr->min_cpus)
+			sjob_ptr->max_cpus = sjob_ptr->min_cpus;
+
+		if (solver_job_idx >= max_job_count)
+			break;
 	}
 	for (i = 0; i < solver_job_idx; i++) {
 		job_list[i].priority -= (minprio - 1);
-		debug("prio before solve %d: %f - %u",i,(double)(job_list[i].priority),(job_list[i].priority));
 	}
 	node_array = _print_nodes_inlpsched();
-	solve_allocation(node_record_count, solver_job_idx, 3, node_array, job_list);
-	debug("xafter allocation, heres the result:");
+	solve_allocation(node_record_count, solver_job_idx, 
+		sched_interval - 1, node_array, job_list);
+	/*	
+	debug3("xafter allocation, heres the result:");
 	for (i=0;i<node_record_count;i++)
-		debug("node %d remgpu %u remcpu %u",i,node_array[i].rem_gpus,node_array[i].rem_cpus);
-
+		debug3("node %d remgpu %u remcpu %u",
+			i,node_array[i].rem_gpus,node_array[i].rem_cpus);
+	*/
 	for (i=0;i<solver_job_idx;i++) {
-		solver_job_ptr = &job_list[i];
-		job_ptr = solver_job_ptr->job_ptr;
-		debug("job %d requirements, minnodes: %d, maxnodes: %d, mincpus: %d, maxcpus: %d, allocated: %d",
-			solver_job_ptr->job_id, solver_job_ptr->min_nodes, solver_job_ptr->max_nodes, 
-			solver_job_ptr->min_cpus, solver_job_ptr->max_cpus, solver_job_ptr->alloc_total);
-		if (!solver_job_ptr->alloc_total) { 
+		sjob_ptr = &job_list[i];
+		job_ptr = sjob_ptr->job_ptr;
+		if (!sjob_ptr->alloc_total) { 
+			debug3("job %d not allocated, continuing.",sjob_ptr->job_id);
 			continue;
-		} /* job is allocated resources, create req_node_layout matrix */
-		bit_and(avail_bitmap, solver_job_ptr->node_bitmap); 		
+		} 
+		/* job is allocated resources, create req_node_layout matrix */
+		/*
+		debug3("job %d minnodes: %d, maxnodes: %d", sjob_ptr->job_id, 
+			sjob_ptr->min_nodes, sjob_ptr->max_nodes);
+
+		debug3("job %d mincpus: %d, maxcpus: %d, allocated: %d",
+			sjob_ptr->min_cpus, sjob_ptr->max_cpus, 
+			sjob_ptr->alloc_total);
+
+		bit_and(avail_bitmap, sjob_ptr->node_bitmap); 		
 		/* Identify usable nodes for this job */
 		bit_and(avail_bitmap, part_ptr->node_bitmap);
 		bit_and(avail_bitmap, up_node_bitmap);
@@ -642,31 +452,38 @@ static int _run_solver_opt(void)
 				this_sched_timeout += sched_timeout;
 			}
 		}
-		_start_job(job_ptr, solver_job_ptr->node_bitmap);
+		_start_job(job_ptr, sjob_ptr->node_bitmap);
 	}
 
+	debug3("in runsolveropt after loop");
+	free_and_null((char **) &job_list);
+	debug3("in runsolveropt after loop");
 	FREE_NULL_BITMAP(avail_bitmap);
+	debug3("in runsolveropt after loop");
 	FREE_NULL_BITMAP(resv_bitmap);
+	debug3("in runsolveropt after loop");
 
 	list_destroy(job_queue);
+	debug3("in runsolveropt after loop");
 	return rc;
 }
 
 /*
-serenkod
+takes the empty cpu & gpu information from the select plugin
+and returns it to the ilp solver
 */
 struct sched_nodeinfo* _print_nodes_inlpsched()
 {
 	time_t d = time(NULL);
 	int i;
 	struct select_nodeinfo *nodeinfo = NULL;
-	struct sched_nodeinfo* node_array = xmalloc(sizeof(struct sched_nodeinfo* ) * node_record_count);
-	info("currently in _print_nodes_lpsched();");
+	struct sched_nodeinfo* node_array = xmalloc(
+		sizeof(struct sched_nodeinfo* ) * node_record_count);
 	select_g_select_nodeinfo_set_all(d);
 	for (i = 0; i < node_record_count; i++) {
-		select_g_select_nodeinfo_get(node_record_table_ptr[i].select_nodeinfo,
-					     SELECT_NODEDATA_PTR, 0,
-					     (void *)&nodeinfo);
+		select_g_select_nodeinfo_get(
+			node_record_table_ptr[i].select_nodeinfo, 
+			SELECT_NODEDATA_PTR, 0, (void *)&nodeinfo);
 		if(!nodeinfo) {
 			error("no nodeinfo returned from structure");
 			continue;
@@ -675,9 +492,10 @@ struct sched_nodeinfo* _print_nodes_inlpsched()
 		node_array[i].rem_cpus = nodeinfo->rem_cpus;
 		/* 
 		test commands
-		info("node %d cpu %u",i,node_record_table_ptr[i].cpus);
-		info("lpschedde alloc cpu in node %d is %u, rem_gpu %u",i,nodeinfo->alloc_cpus,nodeinfo->rem_gpus); 
 		*/
+		info("node %d cpu %u",i,node_record_table_ptr[i].cpus);
+		info("lpschedde alloc cpu in node %d is %u, rem_gpu %u",
+			i,nodeinfo->alloc_cpus,nodeinfo->rem_gpus); 
 	}
 	return node_array;
 }

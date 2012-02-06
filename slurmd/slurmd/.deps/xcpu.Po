@@ -1,3 +1,0 @@
-xcpu.o: xcpu.c ../../../config.h
-
-../../../config.h:

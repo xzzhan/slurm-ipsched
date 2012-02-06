@@ -48,10 +48,19 @@ populateproblem (IloModel model, IloNumVarArray x, IloRangeArray c,
 		}
 	}
 
+	// sum over nodes (allocated cpu) should be equal to job's requested cpu
+	// sum_j(x_ij) == r_j * s_j
+	for (int j = 0; j < windowSize; j++) {
+                IloExpr expr(env);
+                for (int i = 0; i < nodeSize; i++)
+                        expr += x[i * windowSize + j];
+                model.add(expr == (int)job_list[j].min_cpus * x[nodeSize * windowSize + j]);
+        }
+
         // sum over jobs for cpu should be available 
-	// sum_i(x_ij) <= R_j
+	// sum_j(x_ij) <= R_i
 	for (int i = 0; i < nodeSize; i++) {
-                c.add(IloRange(env, 0, node_array[i].rem_cpus);
+                c.add(IloRange(env, 0, (int)node_array[i].rem_cpus);
                 for (int j = 0; j < windowSize; j++) 
                         c[i].setLinearCoef(x[(i * windowSize + j)], 1);
                 //stringstream ss;
@@ -59,19 +68,20 @@ populateproblem (IloModel model, IloNumVarArray x, IloRangeArray c,
                 c[i].setName(ss.str().c_str());
         }
 	
-	// sum over nodes (allocated cpu) should be equal to job's requested cpu
-	// sum_j(x_ij) == r_j * s_j
-	for (int j = 0; j < windowSize; j++) {
-                IloExpr expr(env);
-                for (int i = 0; i < nodeSize; i++)
-                        expr += x[i * windowSize + j];
-                model.add(expr == job_list[j].min_cpus * x[nodeSize * windowSize + j]);
+        // sum over jobs for gpu should be available on each node
+	// sum_j(t_ji * g_j) <= G_i
+	for (int i = 0; i < nodeSize; i++) {
+                c.add(IloRange(env, 0, (int)node_array[i].rem_gpus);
+                for (int j = 0; j < windowSize; j++) 
+                        c[i].setLinearCoef(x[varcounter + j * nodeSize + i], (int)job_array[j].gpu);
+                //stringstream ss;
+                //ss << "R" << i;
+                c[i].setName(ss.str().c_str());
         }
-
+	
 	// gpu constraint here
-
         // t_ji is 1 if job j is allocated resourced in node i
-	// t_ji = 1 if x_ijk > 0
+	// t_ji = 1 if x_ij > 0
 	for (int j = 0; j < windowSize; j++)  {
 		for (int i = 0; i < nodeSize; i++) {
 			IloExpr exp(env);
@@ -89,6 +99,14 @@ populateproblem (IloModel model, IloNumVarArray x, IloRangeArray c,
 		model.add( expr/ (nodeSize+1) == x[(nodeSize + 1) * windowSize + j]);
 	}
 
+	// min_nodes_j <= c_j * (nodeSize + 1) <= max_nodes_j
+	for (int j = 0; j < windowSize; j++) {
+		IloExpr exp(env);
+		exp = (x[(nodeSize + 1) * windowSize + j] * nodeSize + 1);
+		model.add(exp <= (int)job_array[j].max_nodes);
+		model.add(exp >= (int)job_array[j].min_nodes);
+	}
+
 	for (int j = 0; j < windowSize; j++) {
 		// p_j * s_j
 		obj.setLinearCoef(x[nodeSize * windowSize + j], job_list[j].priority);
@@ -100,8 +118,8 @@ populateproblem (IloModel model, IloNumVarArray x, IloRangeArray c,
 }
 
 // resourceno is taken as 1, we are scheduling only for CPU!
-void solve_allocation(int nodeSize, int windowSize, sched_nodeinfo_t *node_array, 
-			solver_job_list_t *job_list)
+void solve_allocation(int nodeSize, int windowSize, int timeout,
+			sched_nodeinfo_t *node_array, solver_job_list_t *job_list)
 {
 	IloEnv   env;
 	try {

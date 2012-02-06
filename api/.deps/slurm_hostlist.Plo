@@ -1,3 +1,0 @@
-slurm_hostlist.lo: slurm_hostlist.c ../../config.h
-
-../../config.h:

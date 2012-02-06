@@ -1,4 +1,5 @@
-lpsched.lo: lpsched.c /usr/include/pthread.h /usr/include/features.h \
+solver_lpsolve.lo: solver_lpsolve.c solver_lpsolve.h \
+ /usr/include/pthread.h /usr/include/features.h \
  /usr/include/bits/predefs.h /usr/include/sys/cdefs.h \
  /usr/include/bits/wordsize.h /usr/include/gnu/stubs.h \
  /usr/include/gnu/stubs-32.h /usr/include/endian.h \
@@ -77,13 +78,21 @@ lpsched.lo: lpsched.c /usr/include/pthread.h /usr/include/features.h \
  ../../../../src/slurmctld/node_scheduler.h \
  ../../../../src/slurmctld/preempt.h \
  ../../../../src/slurmctld/reservation.h \
- ../../../../src/slurmctld/srun_comm.h \
+ ../../../../src/slurmctld/srun_comm.h lp_lib.h /usr/include/math.h \
+ /usr/include/bits/huge_val.h /usr/include/bits/huge_valf.h \
+ /usr/include/bits/huge_vall.h /usr/include/bits/inf.h \
+ /usr/include/bits/nan.h /usr/include/bits/mathdef.h \
+ /usr/include/bits/mathcalls.h /usr/include/bits/mathinline.h lp_types.h \
+ lp_utils.h /usr/include/dlfcn.h /usr/include/bits/dlfcn.h lp_Hash.h \
+ lp_matrix.h lp_mipbb.h lp_SOS.h \
  ../../../../src/plugins/select/lpconsres/select_lpconsres.h \
  /usr/include/fcntl.h /usr/include/bits/fcntl.h /usr/include/bits/stat.h \
  /usr/include/bits/fcntl2.h ../../../../src/common/gres.h \
  ../../../../src/common/slurm_resource_info.h \
  ../../../../src/common/slurm_topology.h \
  ../../../../src/slurmd/slurmd/slurmd.h lpsched.h
+
+solver_lpsolve.h:
 
 /usr/include/pthread.h:
 
@@ -358,6 +367,42 @@ lpsched.lo: lpsched.c /usr/include/pthread.h /usr/include/features.h \
 ../../../../src/slurmctld/reservation.h:
 
 ../../../../src/slurmctld/srun_comm.h:
+
+lp_lib.h:
+
+/usr/include/math.h:
+
+/usr/include/bits/huge_val.h:
+
+/usr/include/bits/huge_valf.h:
+
+/usr/include/bits/huge_vall.h:
+
+/usr/include/bits/inf.h:
+
+/usr/include/bits/nan.h:
+
+/usr/include/bits/mathdef.h:
+
+/usr/include/bits/mathcalls.h:
+
+/usr/include/bits/mathinline.h:
+
+lp_types.h:
+
+lp_utils.h:
+
+/usr/include/dlfcn.h:
+
+/usr/include/bits/dlfcn.h:
+
+lp_Hash.h:
+
+lp_matrix.h:
+
+lp_mipbb.h:
+
+lp_SOS.h:
 
 ../../../../src/plugins/select/lpconsres/select_lpconsres.h:
 
